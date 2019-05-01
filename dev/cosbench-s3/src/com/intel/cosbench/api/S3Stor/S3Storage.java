@@ -3,6 +3,7 @@ package com.intel.cosbench.api.S3Stor;
 import static com.intel.cosbench.client.S3Stor.S3Constants.*;
 
 import java.io.*;
+import java.util.Random;
 
 import org.apache.http.HttpStatus;
 
@@ -10,7 +11,7 @@ import com.amazonaws.*;
 import com.amazonaws.auth.*;
 import com.amazonaws.services.s3.*;
 import com.amazonaws.services.s3.model.*;
-
+import com.amazonaws.util.IOUtils;
 import com.intel.cosbench.api.storage.*;
 import com.intel.cosbench.api.context.*;
 import com.intel.cosbench.config.Config;
@@ -24,6 +25,11 @@ public class S3Storage extends NoneStorage {
     private String endpoint;
     
     private AmazonS3 client;
+    
+    private boolean isPrefetch; 
+    private boolean isRangeRequest; 
+    private long fileLength;
+    private long chunkLength;
 
     @Override
     public void init(Config config, Logger logger) {
@@ -42,6 +48,11 @@ public class S3Storage extends NoneStorage {
         
 		String proxyHost = config.get(PROXY_HOST_KEY, "");
 		String proxyPort = config.get(PROXY_PORT_KEY, "");
+		
+		isPrefetch = config.getBoolean("is_prefetch", false);
+		isRangeRequest = config.getBoolean("is_range_request", false);
+		fileLength = config.getLong("file_length", 4000000L); // 4000000L = 4MB
+		chunkLength = config.getLong("chunk_length", 1000000L); // 1000000L = 1MB
         
         parms.put(ENDPOINT_KEY, endpoint);
     	parms.put(AUTH_USERNAME_KEY, accessKey);
@@ -81,6 +92,7 @@ public class S3Storage extends NoneStorage {
         clientConf.setSocketTimeout(timeout);
         clientConf.withUseExpectContinue(false);
         clientConf.withSignerOverride("S3SignerType");
+        System.setProperty(SDKGlobalConfiguration.ENABLE_S3_SIGV4_SYSTEM_PROPERTY, "true");
 //        clientConf.setProtocol(Protocol.HTTP);
 		if((!parms.getStr(PROXY_HOST_KEY).equals(""))&&(!parms.getStr(PROXY_PORT_KEY).equals(""))){
 			clientConf.setProxyHost(parms.getStr(PROXY_HOST_KEY));
@@ -119,10 +131,28 @@ public class S3Storage extends NoneStorage {
         super.getObject(container, object, config);
         InputStream stream = null;
         try {
-        	
-            S3Object s3Obj = client.getObject(container, object);
-            stream = s3Obj.getObjectContent();
-            
+        	if(isPrefetch) {
+        		GetObjectRequest prefetchObjectRequest = new GetObjectRequest(container, object);
+        		prefetchObjectRequest.putCustomRequestHeader("prefetch", "value");
+//       		    prefetchObjectRequest.putCustomQueryParameter("prefetch", "value");
+        		S3Object s3Obj = client.getObject(prefetchObjectRequest);
+        		stream = s3Obj.getObjectContent();
+        	} else if (isRangeRequest) {
+        		GetObjectRequest rangeObjectRequest = new GetObjectRequest(container, object);
+        		
+        		Random rand = new Random();
+        		
+        		long start = (long)(rand.nextDouble() * (fileLength - chunkLength));
+        		long end = start + chunkLength - 1;
+        		
+        		rangeObjectRequest.setRange(start, end);
+        		
+        		S3Object s3Obj = client.getObject(rangeObjectRequest);
+        		stream = s3Obj.getObjectContent();
+        	} else {
+        		S3Object s3Obj = client.getObject(container, object);
+                stream = s3Obj.getObjectContent();
+        	}   
         } catch(AmazonServiceException ase) {
         	if(ase.getStatusCode() != HttpStatus.SC_NOT_FOUND) {
         		throw new StorageException(ase);
